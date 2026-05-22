@@ -1,0 +1,84 @@
+---
+- hosts: inference
+  become: true
+
+  tasks:
+    - name: Update apt
+      apt:
+        update_cache: yes
+
+    - name: Install prerequisites
+      apt:
+        name: [python3, python3-pip, git, curl, jq]
+        state: present
+
+    - name: Install iii
+      shell: |
+        curl -fsSL https://install.iii.dev/iii/main/install.sh | sh
+      args:
+        creates: /home/ubuntu/.local/bin/iii
+      become_user: ubuntu
+
+    - name: Clone repo
+      git:
+        repo: https://github.com/Alchemyst-ai/hiring
+        dest: /home/ubuntu/quickstart
+        version: main
+        force: yes
+      become_user: ubuntu
+
+    - name: Fix inference worker - engine URL, tokens, format
+      shell: |
+        sed -i 's|ws://localhost:49134|ws://{{ gateway_ip }}:49134|g' /home/ubuntu/quickstart/may-2026/devops/quickstart/workers/inference-worker/inference_worker.py
+        sed -i 's/max_new_tokens=32000/max_new_tokens=200/' /home/ubuntu/quickstart/may-2026/devops/quickstart/workers/inference-worker/inference_worker.py
+        sed -i 's/return result/return {"response": result}/' /home/ubuntu/quickstart/may-2026/devops/quickstart/workers/inference-worker/inference_worker.py
+        sed -i 's/max_new_tokens=200)/max_new_tokens=200, repetition_penalty=1.3, do_sample=True, temperature=0.7)/' /home/ubuntu/quickstart/may-2026/devops/quickstart/workers/inference-worker/inference_worker.py
+
+    - name: Install Python dependencies (idempotent)
+      pip:
+        requirements: /home/ubuntu/quickstart/may-2026/devops/quickstart/workers/inference-worker/requirements.txt
+        extra_args: "--extra-index-url https://download.pytorch.org/whl/cpu"
+      become_user: ubuntu
+
+    - name: Upgrade jinja2 and fix packaging version
+      pip:
+        name:
+          - jinja2>=3.1.0
+          - packaging==21.3
+        state: present
+      become_user: ubuntu
+
+    - name: Fix gguf __version__ for packaging compatibility (idempotent)
+      lineinfile:
+        path: "/home/ubuntu/.local/lib/python3.10/site-packages/gguf/__init__.py"
+        line: '__version__ = "0.19.0"'
+        insertbefore: BOF
+        backup: no
+      become_user: ubuntu
+
+    - name: Create inference-worker systemd service
+      copy:
+        dest: /etc/systemd/system/inference-worker.service
+        content: |
+          [Unit]
+          Description=iii Inference Worker
+          After=network.target
+
+          [Service]
+          User=ubuntu
+          WorkingDirectory=/home/ubuntu/quickstart/may-2026/devops/quickstart
+          Environment=PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
+          Environment=III_URL=ws://{{ gateway_ip }}:49134
+          ExecStart=/usr/bin/python3 workers/inference-worker/inference_worker.py
+          Restart=always
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable and start inference-worker
+      systemd:
+        name: inference-worker
+        enabled: true
+        state: started
+        daemon_reload: true

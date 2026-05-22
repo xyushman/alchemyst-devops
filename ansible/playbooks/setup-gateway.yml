@@ -1,0 +1,115 @@
+---
+- hosts: gateway
+  become: true
+
+  tasks:
+    - name: Update apt
+      apt:
+        update_cache: yes
+
+    - name: Install prerequisites
+      apt:
+        name: [git, curl, jq, unzip]
+        state: present
+
+    - name: Install iii engine
+      shell: |
+        curl -fsSL https://install.iii.dev/iii/main/install.sh | sh
+      args:
+        creates: /home/ubuntu/.local/bin/iii
+      become_user: ubuntu
+
+    - name: Install bun
+      shell: |
+        curl -fsSL https://bun.sh/install | bash
+      args:
+        creates: /home/ubuntu/.bun/bin/bun
+      become_user: ubuntu
+
+    - name: Add iii and bun to PATH
+      lineinfile:
+        path: /home/ubuntu/.bashrc
+        line: 'export PATH="/home/ubuntu/.local/bin:/home/ubuntu/.bun/bin:$PATH"'
+
+    - name: Clone repo
+      git:
+        repo: https://github.com/Alchemyst-ai/hiring
+        dest: /home/ubuntu/quickstart
+        version: main
+        force: yes
+      become_user: ubuntu
+
+    - name: Fix config.yaml - replace anuran paths, host, and math-worker name
+      shell: |
+        sed -i 's|/Users/anuran/Alchemyst/hiring/may-2026/devops/quickstart/workers/|/home/ubuntu/quickstart/may-2026/devops/quickstart/workers/|g' /home/ubuntu/quickstart/may-2026/devops/quickstart/config.yaml
+        sed -i 's/name: math-worker/name: inference-worker/' /home/ubuntu/quickstart/may-2026/devops/quickstart/config.yaml
+        sed -i 's/host: 127.0.0.1/host: 0.0.0.0/' /home/ubuntu/quickstart/may-2026/devops/quickstart/config.yaml
+      notify: Restart iii-engine if config changed
+      changed_when: true
+
+    - name: Fix deprecated runtime.language in worker yamls
+      shell: |
+        sed -i 's/language:/kind:/g' /home/ubuntu/quickstart/may-2026/devops/quickstart/workers/caller-worker/iii.worker.yaml
+        sed -i 's/language:/kind:/g' /home/ubuntu/quickstart/may-2026/devops/quickstart/workers/inference-worker/iii.worker.yaml
+
+    - name: Install caller-worker npm dependencies with bun
+      shell: |
+        cd /home/ubuntu/quickstart/may-2026/devops/quickstart/workers/caller-worker
+        /home/ubuntu/.bun/bin/bun install
+      args:
+        creates: /home/ubuntu/quickstart/may-2026/devops/quickstart/workers/caller-worker/node_modules
+
+    - name: Create iii engine systemd service
+      copy:
+        dest: /etc/systemd/system/iii-engine.service
+        content: |
+          [Unit]
+          Description=iii Engine
+          After=network.target
+
+          [Service]
+          User=ubuntu
+          WorkingDirectory=/home/ubuntu/quickstart/may-2026/devops/quickstart
+          Environment=PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
+          ExecStart=/home/ubuntu/.local/bin/iii --config config.yaml
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Create caller-worker systemd service (bun)
+      copy:
+        dest: /etc/systemd/system/caller-worker.service
+        content: |
+          [Unit]
+          Description=iii Caller Worker (bun)
+          After=network.target iii-engine.service
+          Wants=iii-engine.service
+
+          [Service]
+          User=ubuntu
+          WorkingDirectory=/home/ubuntu/quickstart/may-2026/devops/quickstart
+          Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.bun/bin:/usr/local/bin:/usr/bin:/bin
+          ExecStart=/home/ubuntu/.bun/bin/bun run workers/caller-worker/src/worker.ts
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable and start services
+      systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+      loop:
+        - iii-engine
+        - caller-worker
+
+  handlers:
+    - name: Restart iii-engine if config changed
+      systemd:
+        name: iii-engine
+        state: restarted

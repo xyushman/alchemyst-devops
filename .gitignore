@@ -1,0 +1,17 @@
+# Terraform
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.backup
+*.tfvars
+
+# SSH keys - NEVER commit these
+*.pem
+*.key
+
+# Ansible retry files
+*.retry
+
+# OS
+.DS_Store
+__pycache__/
